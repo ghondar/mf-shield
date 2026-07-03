@@ -13,6 +13,12 @@
     "react"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ghondar/mf-shield.git"
+  },
+  "homepage": "https://github.com/ghondar/mf-shield#readme",
+  "bugs": "https://github.com/ghondar/mf-shield/issues",
   "type": "module",
   "sideEffects": false,
   "main": "./dist/index.cjs",
