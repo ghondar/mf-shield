@@ -1,5 +1,9 @@
 # mf-shield
 
+[![npm version](https://img.shields.io/npm/v/mf-shield)](https://www.npmjs.com/package/mf-shield)
+[![CI](https://github.com/ghondar/mf-shield/actions/workflows/ci.yml/badge.svg)](https://github.com/ghondar/mf-shield/actions/workflows/ci.yml)
+[![license: MIT](https://img.shields.io/npm/l/mf-shield)](./LICENSE)
+
 > English docs → [README.md](./README.md)
 
 Un escudo de resiliencia para Module Federation. Encapsula las fallas típicas que tumban un host cuando carga remotes que no controlas al 100%: manifest caído, exposed module faltante, chunk 404, render crash, timeout, mismatch de versiones, CSS global peligroso y acceso directo no autorizado.

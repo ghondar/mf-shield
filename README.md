@@ -1,5 +1,9 @@
 # mf-shield
 
+[![npm version](https://img.shields.io/npm/v/mf-shield)](https://www.npmjs.com/package/mf-shield)
+[![CI](https://github.com/ghondar/mf-shield/actions/workflows/ci.yml/badge.svg)](https://github.com/ghondar/mf-shield/actions/workflows/ci.yml)
+[![license: MIT](https://img.shields.io/npm/l/mf-shield)](./LICENSE)
+
 > Documentación en español → [README.es.md](./README.es.md)
 
 A resilience shield for Module Federation. It wraps the typical failures that take a host down when it loads remotes you don't fully control: dead manifest, missing exposed module, chunk 404, render crash, timeout, version mismatch, dangerous global CSS, and unauthorized direct access.
