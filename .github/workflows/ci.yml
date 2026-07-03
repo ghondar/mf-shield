@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: quality (react ${{ matrix.react-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        react-version: [18, 19]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      # React 18 leg: the package pins React 19 as devDependency for its own
+      # build; pnpm.overrides forces the whole tree to 18 before reinstalling
+      # (lockfile intentionally not frozen because the override changes
+      # resolution). The react-19 leg uses the pinned devDependency as-is.
+      - name: Override React to 18
+        if: matrix.react-version == 18
+        run: |
+          pnpm pkg set "pnpm.overrides.react=^18.2.0"
+          pnpm pkg set "pnpm.overrides.react-dom=^18.2.0"
+          pnpm pkg set "pnpm.overrides.@types/react=^18"
+          pnpm pkg set "pnpm.overrides.@types/react-dom=^18"
+          pnpm install --no-frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Unit tests
+        run: pnpm test
+
+      - name: Lint package (publint + attw)
+        run: pnpm lint:pkg
