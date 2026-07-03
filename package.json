@@ -1,0 +1,97 @@
+{
+  "name": "mf-shield",
+  "version": "0.1.0",
+  "description": "A resilience shield for Module Federation: typed errors, access policies, timeouts, SRI, CSS-poison guard and React boundaries",
+  "keywords": [
+    "module-federation",
+    "micro-frontends",
+    "microfrontends",
+    "resilience",
+    "error-boundary",
+    "sri",
+    "runtime-plugin",
+    "react"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.cjs",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./react": {
+      "import": {
+        "types": "./dist/react.d.ts",
+        "default": "./dist/react.js"
+      },
+      "require": {
+        "types": "./dist/react.d.cts",
+        "default": "./dist/react.cjs"
+      }
+    },
+    "./federation": {
+      "import": {
+        "types": "./dist/federation.d.ts",
+        "default": "./dist/federation.js"
+      },
+      "require": {
+        "types": "./dist/federation.d.cts",
+        "default": "./dist/federation.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "tsdown",
+    "dev": "tsdown --watch",
+    "test": "vitest run",
+    "typecheck": "pnpm run build && tsc --noEmit",
+    "lint:pkg": "publint --strict && attw --pack . --profile strict --ignore-rules no-resolution"
+  },
+  "peerDependencies": {
+    "@module-federation/runtime": "^2.6.0",
+    "react": "^18.2.0 || ^19.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@module-federation/runtime": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.4",
+    "@module-federation/runtime": "2.6.0",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/react": "^16.3.2",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "jsdom": "^25.0.1",
+    "publint": "^0.3.21",
+    "react": "19.2.5",
+    "react-dom": "19.2.5",
+    "tsdown": "^0.15.12",
+    "typescript": "^5.7.2",
+    "vitest": "^3.2.6"
+  }
+}
