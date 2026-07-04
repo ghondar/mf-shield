@@ -1,5 +1,5 @@
 import { createInstance, init, loadRemote, registerRemotes } from "@module-federation/runtime";
-import type { ModuleFederationRuntimePlugin } from "@module-federation/runtime";
+import type { ModuleFederation, ModuleFederationRuntimePlugin } from "@module-federation/runtime";
 
 import { evaluateRemoteAccess, validateSharedSingletons } from "./core";
 import type { RemoteAccessDecision, SharedModules, ShareStrategy } from "./core";
@@ -58,6 +58,34 @@ export function createFederationRuntime<RemoteName extends string>({
  * after initialization"). `createInstance` construye una instancia nueva e independiente y el loader devuelto
  * queda ligado a ella (`instance.registerRemotes` + `instance.loadRemote`), sin tocar el runtime primario.
  */
+/**
+ * Loader ligado a instancia, con dedup de registro por remote (`Set`), compartido por
+ * {@link createInstanceFederationRuntime} y {@link createLoaderFromInstance}. Cuando `remoteEntries` es
+ * `undefined`, omite todo el registro: se asume que los remotes ya están registrados en la instancia
+ * (caso típico del plugin de bundler que auto-inicializa el runtime). Un módulo nulo lanza
+ * {@link RemoteModuleNullError}.
+ */
+function bindInstanceLoader<RemoteName extends string>(
+  instance: ModuleFederation,
+  remoteEntries?: Record<RemoteName, RemoteEntry<RemoteName>>
+) {
+  const registeredRemotes = new Set<RemoteName>();
+
+  return async function loadFederatedModule<T>(id: `${RemoteName}/${string}`): Promise<T> {
+    if (remoteEntries) {
+      const remoteName = id.split("/")[0] as RemoteName;
+      if (!registeredRemotes.has(remoteName)) {
+        instance.registerRemotes([remoteEntries[remoteName]]);
+        registeredRemotes.add(remoteName);
+      }
+    }
+
+    const module = await instance.loadRemote<T>(id);
+    if (!module) throw new RemoteModuleNullError(id);
+    return module;
+  };
+}
+
 export function createInstanceFederationRuntime<RemoteName extends string>({
   remoteEntries,
   remotes = [],
@@ -65,20 +93,53 @@ export function createInstanceFederationRuntime<RemoteName extends string>({
 }: FederationRuntimeOptions<RemoteName>) {
   warnSharedSingletons(options.shared, options.shareStrategy);
   const instance = createInstance({ ...options, remotes } as FederationInitOptions);
-  const registeredRemotes = new Set<RemoteName>();
+  return bindInstanceLoader(instance, remoteEntries);
+}
 
-  return async function loadFederatedModule<T>(id: `${RemoteName}/${string}`): Promise<T> {
-    const remoteName = id.split("/")[0] as RemoteName;
+export type ShieldInstanceOptions<RemoteName extends string> = {
+  /**
+   * Mapa `remoteName -> RemoteEntry`. Cuando se provee, el loader registra cada remote de forma perezosa
+   * en la instancia (mismo dedup por `Set` que {@link createFederatedLoader}). Cuando se omite, NO se
+   * registra nada: los ids se cargan contra los remotes ya registrados en la instancia.
+   */
+  remoteEntries?: Record<RemoteName, RemoteEntry<RemoteName>>;
+  /** Plugins de runtime registrados una sola vez, al crear el loader, vía `instance.registerPlugins`. */
+  plugins?: ModuleFederationRuntimePlugin[];
+};
 
-    if (!registeredRemotes.has(remoteName)) {
-      instance.registerRemotes([remoteEntries[remoteName]]);
-      registeredRemotes.add(remoteName);
-    }
-
-    const module = await instance.loadRemote<T>(id);
-    if (!module) throw new RemoteModuleNullError(id);
-    return module;
-  };
+/**
+ * Crea un loader tipado ligado a una instancia de MF **ya existente**. Es el caso mayoritario del mundo real:
+ * el plugin de bundler auto-inicializa el runtime y la app obtiene la instancia con `getInstance()`.
+ *
+ * A diferencia de {@link createInstanceFederationRuntime} (que llama a `createInstance` internamente), aquí la
+ * instancia es un **parámetro**: la librería nunca llama a `getInstance()` (eso mantiene el módulo testeable y
+ * desacoplado de si la instancia viene del entry `enhanced/runtime` o `runtime`). El *null-guard* de
+ * `getInstance()` (que puede devolver `null` si el runtime no se inicializó) es responsabilidad del caller.
+ *
+ * - `options.plugins`: se registran una vez, al crear el loader, vía `instance.registerPlugins`.
+ * - `options.remoteEntries`: si se provee, el loader registra cada remote perezosamente con el mismo dedup por
+ *   `Set` que {@link createFederatedLoader}. Si se omite, se cargan los ids contra los remotes ya registrados.
+ * - Un módulo remoto nulo lanza {@link RemoteModuleNullError}.
+ *
+ * @example
+ * ```ts
+ * import { getInstance } from "@module-federation/runtime";
+ * import { createLoaderFromInstance } from "mf-shield/federation";
+ *
+ * const instance = getInstance();
+ * if (!instance) throw new Error("MF runtime not initialized yet");
+ * const loadRemote = createLoaderFromInstance(instance, { plugins: [accessPlugin] });
+ * const mod = await loadRemote<{ RemoteWidget: RemoteComponent }>("stable/Widget");
+ * ```
+ */
+export function createLoaderFromInstance<RemoteName extends string = string>(
+  instance: ModuleFederation,
+  options?: ShieldInstanceOptions<RemoteName>
+) {
+  if (options?.plugins?.length) {
+    instance.registerPlugins(options.plugins);
+  }
+  return bindInstanceLoader(instance, options?.remoteEntries);
 }
 
 export function createFederatedLoader<RemoteName extends string>(remoteEntries: Record<RemoteName, RemoteEntry<RemoteName>>) {
@@ -137,16 +198,128 @@ export type RemoteFallbackInfo = {
   from: "build" | "runtime";
 };
 
-export type RemoteFallbackPluginOptions = {
-  fallback: (info: RemoteFallbackInfo) => unknown | undefined;
+export type RemoteFallback = (info: RemoteFallbackInfo) => unknown | undefined;
+
+/**
+ * Stub de módulo remoto: el objeto módulo directo (`{ Export: value }`), o una factory (sync o async)
+ * que lo produce. Una factory se invoca al aplicarse; el valor devuelto/resuelto es el contenido del módulo.
+ */
+export type RemoteModuleStub = Record<string, unknown> | (() => unknown) | (() => Promise<unknown>);
+
+/**
+ * Mapa declarativo `id -> stub` para el fallback. Las claves son ids completos `"<remote>/<expose>"`;
+ * la clave opcional `"*"` actúa como catch-all cuando ningún id exacto matchea.
+ */
+export type RemoteStubMap = Record<string, RemoteModuleStub>;
+
+/**
+ * Entrada para sintetizar un manifest offline mínimo. Todo es opcional; los campos ausentes usan defaults.
+ */
+export type OfflineManifestInput = {
+  name?: string;
+  globalName?: string;
+  publicPath?: string;
+  remoteEntryName?: string;
 };
 
 /**
+ * Tipo LOCAL mínimo del manifest MF, con exactamente los campos que `generateSnapshotFromManifest` de
+ * @module-federation/sdk 2.6.0 exige como obligatorios. No se importa el tipo `Manifest` del sdk a propósito:
+ * en pnpm con node_modules estricto + bundling de dts de tsdown, resolver ese tipo del lado del consumidor es
+ * frágil. Este shape se verificó contra el sdk 2.6.0:
+ * - Top-level requeridos: `id`, `name`, `metaData`, `shared: []`, `remotes: []`, `exposes: []`.
+ * - `metaData` requeridos: `name`, `globalName`, `type`, `publicPath`, `remoteEntry`, `buildInfo`.
+ * - `metaData.remoteEntry`: `{ name, path, type }`.
+ * - `metaData.buildInfo`: `{ buildVersion, buildName }`.
+ */
+export type OfflineManifest = {
+  id: string;
+  name: string;
+  metaData: {
+    name: string;
+    globalName: string;
+    type: string;
+    publicPath: string;
+    remoteEntry: { name: string; path: string; type: string };
+    buildInfo: { buildVersion: string; buildName: string };
+  };
+  shared: [];
+  remotes: [];
+  exposes: [];
+};
+
+export type RemoteFallbackPluginOptions = {
+  /**
+   * Fallback ante fallo de carga. Dos formas:
+   * - Función {@link RemoteFallback}: control total (recibe `{ id, error, lifecycle, from }`).
+   * - Mapa declarativo {@link RemoteStubMap}: `id -> stub`, con gate de lifecycle automático (ver abajo).
+   */
+  fallback: RemoteFallback | RemoteStubMap;
+  /**
+   * Habilita la síntesis de un manifest offline. `true` usa defaults; un {@link OfflineManifestInput}
+   * personaliza `name`/`globalName`/`publicPath`/`remoteEntryName`. Cuando está habilitado, el plugin gana un
+   * loaderHook `fetch`: si `globalThis.fetch` falla/rechaza, devuelve un `Response` 200 con el manifest
+   * sintetizado, para que el runtime pueda continuar aunque el manifest real no esté disponible.
+   */
+  offlineManifest?: boolean | OfflineManifestInput;
+  /** Se invoca cuando el `fetch` real falla y se sirve el manifest sintetizado, con la URL y el error. */
+  onOfflineManifest?: (info: { manifestUrl: string; error: unknown }) => void;
+};
+
+/**
+ * Sintetiza un manifest MF offline mínimo (ver {@link OfflineManifest}). Pura, exportada y unit-testeable.
+ * Contiene exactamente los campos que `generateSnapshotFromManifest` de @module-federation/sdk 2.6.0 exige.
+ */
+export function buildOfflineManifest(input: OfflineManifestInput = {}): OfflineManifest {
+  const name = input.name ?? "mf-shield-offline";
+  const globalName = input.globalName ?? name;
+  const publicPath = input.publicPath ?? "/";
+  const remoteEntryName = input.remoteEntryName ?? "remoteEntry.js";
+
+  return {
+    id: name,
+    name,
+    metaData: {
+      name,
+      globalName,
+      type: "app",
+      publicPath,
+      remoteEntry: { name: remoteEntryName, path: "", type: "global" },
+      buildInfo: { buildVersion: "0.0.0", buildName: name }
+    },
+    shared: [],
+    remotes: [],
+    exposes: []
+  };
+}
+
+function isStubMap(fallback: RemoteFallback | RemoteStubMap): fallback is RemoteStubMap {
+  return typeof fallback !== "function";
+}
+
+/**
+ * Compila un {@link RemoteStubMap} a la firma de {@link RemoteFallback}, con el **gate de lifecycle**: los stubs
+ * solo se aplican cuando `info.lifecycle === "onLoad"`. Devolver contenido de módulo en otros lifecycles corrompe
+ * el share scope (MF lo trata como args de request de reemplazo), así que fuera de `onLoad` se propaga `undefined`.
+ * El match es por id exacto; si no hay match usa la clave `"*"` (catch-all) si existe. Las factories se invocan
+ * (soportan async).
+ */
+function compileStubMap(map: RemoteStubMap): RemoteFallback {
+  return info => {
+    if (info.lifecycle !== "onLoad") return undefined;
+    const stub = map[info.id] ?? map["*"];
+    if (stub === undefined) return undefined;
+    return typeof stub === "function" ? stub() : stub;
+  };
+}
+
+/**
  * Plugin de runtime MF (`FederationRuntimePlugin`) que intercepta fallos de carga de remotes en el
- * hook `errorLoadRemote`. Llama a `fallback` con info normalizada (`id`, `error`, `lifecycle`, `from`).
+ * hook `errorLoadRemote`. La opción `fallback` acepta una función {@link RemoteFallback} (control total) o un
+ * mapa declarativo {@link RemoteStubMap} (`id -> stub`, con gate de lifecycle automático).
  *
  * Contrato de retorno (verificado en runtime-core 2.6.0):
- * - Si `fallback` devuelve `undefined`, el plugin no retorna nada y el error original se propaga por el flujo normal.
+ * - Si el fallback devuelve `undefined`, el plugin no retorna nada y el error original se propaga por el flujo normal.
  * - Si el fallo ocurre en el `lifecycle: "onLoad"` (falla real al resolver/cargar el módulo remoto), un valor
  *   devuelto se usa como **contenido del módulo remoto**. Para que un componente React del caller funcione al
  *   cargarse vía `createFederatedLoader` + `RemoteSlot`, devuelve el **objeto módulo** con el mismo shape que
@@ -155,17 +328,46 @@ export type RemoteFallbackPluginOptions = {
  * - Si el fallo ocurre en cualquier lifecycle previo a la carga (`"beforeRequest"`, `"beforeLoadShare"`,
  *   `"afterResolve"`), MF interpreta el valor devuelto como **args de request de reemplazo** `{ id, options, origin }`
  *   para redirigir a otro remote, no como módulo. Para simplemente propagar el error devuelve `undefined` en esos
- *   lifecycles: solo los retornos en `"onLoad"` son contenido de módulo.
+ *   lifecycles: solo los retornos en `"onLoad"` son contenido de módulo. El mapa declarativo aplica ese gate por vos.
+ *
+ * Manifest offline: con `offlineManifest` habilitado, el plugin agrega un loaderHook `fetch` (verificado en
+ * runtime-core 2.6.0: `fetch` es una propiedad de nivel superior del objeto plugin, `AsyncHook<[url, init, ...],
+ * false | void | Promise<Response>>`). Intenta `globalThis.fetch`; ante throw/reject invoca `onOfflineManifest` y
+ * devuelve un `Response` 200 (`Content-Type: application/json`) con {@link buildOfflineManifest}. Sin la opción,
+ * el objeto plugin **no** tiene propiedad `fetch` (cero cambio de comportamiento).
  */
-export function createRemoteFallbackPlugin({ fallback }: RemoteFallbackPluginOptions): ModuleFederationRuntimePlugin {
-  return {
+export function createRemoteFallbackPlugin({
+  fallback,
+  offlineManifest,
+  onOfflineManifest
+}: RemoteFallbackPluginOptions): ModuleFederationRuntimePlugin {
+  const resolveFallback: RemoteFallback = isStubMap(fallback) ? compileStubMap(fallback) : fallback;
+
+  const plugin: ModuleFederationRuntimePlugin = {
     name: "mf-shield-remote-fallback",
     errorLoadRemote(args) {
-      const result = fallback({ id: args.id, error: args.error, lifecycle: args.lifecycle, from: args.from });
+      const result = resolveFallback({ id: args.id, error: args.error, lifecycle: args.lifecycle, from: args.from });
       if (result === undefined) return;
       return result;
     }
   };
+
+  if (offlineManifest) {
+    const manifestInput: OfflineManifestInput = offlineManifest === true ? {} : offlineManifest;
+    plugin.fetch = async (manifestUrl: string, init?: RequestInit) => {
+      try {
+        return await globalThis.fetch(manifestUrl, init);
+      } catch (error) {
+        onOfflineManifest?.({ manifestUrl, error });
+        return new Response(JSON.stringify(buildOfflineManifest(manifestInput)), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+    };
+  }
+
+  return plugin;
 }
 
 /**
