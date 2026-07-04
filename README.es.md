@@ -38,8 +38,8 @@ Ambos peers son opcionales: la entrada core (`.`) es framework-agnostic y no imp
 
 | Import | Contenido | React |
 |---|---|---|
-| `mf-shield` | core: `evaluateRemoteAccess`, `denyRemoteAccess`, `allowRemoteAccess`, `withTimeout`, `removeCssPoison`, `createSharedSingleton`, `validateSharedSingletons` y errores tipados (`FederationTimeoutError`, `RemoteAccessDeniedError`, `RemoteModuleNullError`, `FederationIntegrityError`) | No |
-| `mf-shield/federation` | `createFederationRuntime`, `createInstanceFederationRuntime`, `initFederationShield`, `createFederatedLoader`, plugins de runtime `createRemoteAccessPlugin` / `createRemoteFallbackPlugin` / `createSriPlugin`, `resolveIntegrity`, tipos `RemoteEntry` / `FederationRuntimeOptions` / `SriPluginOptions` / `IntegritySource` | No |
+| `mf-shield` | core: `evaluateRemoteAccess`, `denyRemoteAccess`, `allowRemoteAccess`, `withTimeout`, `removeCssPoison`, `createSharedSingleton`, `validateSharedSingletons`, `assertRemoteExports`, `validateRemoteEntries`, `toFederationResult` y errores tipados (`FederationTimeoutError`, `RemoteAccessDeniedError`, `RemoteModuleNullError`, `FederationIntegrityError`, `MissingRemoteExportError`) | No |
+| `mf-shield/federation` | `createFederationRuntime`, `createInstanceFederationRuntime`, `createLoaderFromInstance`, `initFederationShield`, `createFederatedLoader`, `buildOfflineManifest`, plugins de runtime `createRemoteAccessPlugin` / `createRemoteFallbackPlugin` / `createSriPlugin`, `resolveIntegrity`, tipos `RemoteEntry` / `FederationRuntimeOptions` / `SriPluginOptions` / `IntegritySource` / `ShieldInstanceOptions` / `RemoteStubMap` / `OfflineManifestInput` | No |
 | `mf-shield/react` | `RemoteSlot`, `RemoteBoundary`, `RemoteFallback`, `useCssPoisonGuard`, `ProviderSuspenseBoundary`, `ProviderBoundary`, `ProviderFallback`, el tipo `RemoteFallbackRenderer` y sus prop types | Sí |
 
 El paquete se distribuye compilado (`dist`, ESM + CJS + tipos). No necesitas transpilar `node_modules`.
@@ -241,6 +241,65 @@ import { createInstanceFederationRuntime } from "mf-shield/federation";
 const loadIsolated = createInstanceFederationRuntime({ name: "widgets_host", remoteEntries, plugins: [accessPlugin, fallbackPlugin] });
 ```
 
+### Adopción sobre una instancia de runtime existente (`createLoaderFromInstance`)
+
+El caso mayoritario en el mundo real: el plugin del bundler ya **auto-inicializó** el runtime y tu app lo obtiene con `getInstance()`. No quieres un segundo `init` ni `createInstance`: quieres blindar la instancia que ya tienes. `createLoaderFromInstance` recibe esa instancia como **parámetro** (la librería nunca llama a `getInstance()`, lo que la mantiene testeable y desacoplada del entry `enhanced/runtime` vs `runtime`) y devuelve el mismo loader tipado que `createFederatedLoader`.
+
+```ts
+import { getInstance } from "@module-federation/runtime";
+import { createLoaderFromInstance } from "mf-shield/federation";
+import { createRemoteAccessPlugin, createRemoteFallbackPlugin } from "mf-shield/federation";
+
+const instance = getInstance();
+if (!instance) throw new Error("MF runtime not initialized yet"); // el null-guard es responsabilidad del caller
+
+const loadRemote = createLoaderFromInstance(instance, {
+  plugins: [createRemoteAccessPlugin({ policy: allowPikachuOnly }), createRemoteFallbackPlugin({ fallback: stubMap })],
+  // remoteEntries es opcional: proveelo para registrar de forma perezosa (dedup por Set, igual que createFederatedLoader);
+  // omitelo para cargar ids contra los remotes que el plugin del bundler ya registró.
+  remoteEntries: { stable: { name: "stable", entry: "http://127.0.0.1:4174/mf-manifest.json" } }
+});
+
+const mod = await loadRemote<{ RemoteWidget: RemoteComponent }>("stable/Widget");
+```
+
+- Los `plugins` se registran **una sola vez** al crear el loader vía `instance.registerPlugins`.
+- Con `remoteEntries` omitido no se registra nada; los ids cargan contra los remotes ya registrados.
+- Un módulo nulo lanza `RemoteModuleNullError`, igual que los otros loaders.
+
+### Manifest offline + stubs (`createRemoteFallbackPlugin`)
+
+Dos poderes aditivos sobre el mismo plugin de fallback, ambos opt-in.
+
+**Mapa declarativo de stubs.** En vez de una función `fallback` hecha a mano, pasa un mapa `id -> stub`. Las claves son ids completos `"<remote>/<expose>"`; `"*"` es un catch-all opcional. Un stub es el objeto módulo o una factory (sync o async). El plugin compila el mapa con el **gate de lifecycle** incorporado: los stubs se aplican **solo** cuando `info.lifecycle === "onLoad"` — devolver contenido de módulo en cualquier otro lifecycle corrompe el share scope (MF lo trata como args de request de reemplazo), que es justamente el endurecimiento que un fallback hecho a mano suele omitir.
+
+```ts
+import { createRemoteFallbackPlugin } from "mf-shield/federation";
+import type { RemoteComponent } from "mf-shield/react";
+
+const FaintedCard: RemoteComponent = () => <section>Este Pokémon se debilitó</section>;
+
+const fallbackPlugin = createRemoteFallbackPlugin({
+  fallback: {
+    "stable/Pokedex": { RemotePokedex: FaintedCard },        // stub objeto
+    "stable/Cards": async () => import("./local-cards"),      // factory async
+    "*": { Fallback: FaintedCard }                            // catch-all
+  }
+});
+```
+
+**Síntesis de manifest offline.** Cuando el fetch del manifest falla (provider caído, dev offline), el runtime ni siquiera puede empezar a resolver. Habilita `offlineManifest` para agregar un loaderHook `fetch`: intenta `globalThis.fetch` y, ante throw/reject, invoca `onOfflineManifest` y sirve un manifest sintetizado con `200` para que el runtime pueda continuar.
+
+```ts
+const fallbackPlugin = createRemoteFallbackPlugin({
+  fallback: { "*": { Fallback: FaintedCard } },
+  offlineManifest: { name: "stable", globalName: "stable_g", publicPath: "/stable/" }, // o `true` para defaults
+  onOfflineManifest: ({ manifestUrl, error }) => console.warn(`[app] manifest offline para ${manifestUrl}`, error)
+});
+```
+
+El shape sintetizado contiene exactamente los campos que `generateSnapshotFromManifest` (`@module-federation/sdk` 2.6.0) exige como obligatorios; `buildOfflineManifest(input?)` está exportada y es pura si quieres inspeccionarla o reusarla. Cuando `offlineManifest` se omite, el objeto plugin **no** tiene propiedad `fetch` alguna — cero cambio de comportamiento.
+
 ### Componer con `@module-federation/retry-plugin`
 
 Los plugins del escudo componen con plugins oficiales de MF por la misma opción `plugins`. Para reintentos automáticos de fetch de manifest/chunks, agrega el retry-plugin oficial (instálalo en tu app; **no** es dependencia de esta librería):
@@ -280,6 +339,24 @@ const warnings = validateSharedSingletons({
 ```
 
 Reglas: `singleton: true` sin `strictVersion`, `singleton: true` sin `requiredVersion`, y `shareStrategy: 'version-first'` combinado con cualquier singleton (puede cargar múltiples instancias del singleton y hace eager-load de todos los remote entries en el init).
+
+### Helpers de validación core (agnósticos, sin importar MF)
+
+Tres helpers puros en el entry core (`mf-shield`) para endurecer contratos y componer con seguridad:
+
+| Helper | Resumen |
+|---|---|
+| `assertRemoteExports(module, id, expected)` | Asegura que un remote resuelto exponga los exports esperados; lanza `MissingRemoteExportError` (con `id` + `missing[]`) cuando alguno es `null`/`undefined`. En caso de éxito estrecha el tipo del módulo. |
+| `validateRemoteEntries(entries, policy?)` | Devuelve un reporte (`[]` cuando está limpio, nunca lanza) de issues de remote-entries: `duplicate-name`, `missing-entry`, `invalid-url`, `origin-not-allowed`, `insecure-entry`. Las entradas version-only (estilo registry) omiten los checks de URL; `localhost`/`127.0.0.1`/`[::1]` quedan exentos de `requireHttps`. |
+| `toFederationResult(thunk)` | Ejecuta un thunk sync o async y lo normaliza a un `FederationResult<T, E>` discriminado (`{ ok: true, value } \| { ok: false, error }`), capturando tanto throws síncronos como rechazos. No es una mónada — un único combinador. Compone con `withTimeout` y los errores tipados. |
+
+```ts
+import { assertRemoteExports, validateRemoteEntries, toFederationResult } from "mf-shield";
+
+const result = await toFederationResult(() => withTimeout(loadRemote("stable/Pokedex"), 800, "pokedex"));
+if (!result.ok) return renderFainted(result.error);
+assertRemoteExports(result.value, "stable/Pokedex", ["RemotePokedex"]); // fallo rápido ante drift de contrato
+```
 
 ### CSS poison con debounce (`useCssPoisonGuard`)
 
