@@ -1,34 +1,50 @@
 import {
   allowRemoteAccess,
+  assertRemoteExports,
   createSharedSingleton,
   denyRemoteAccess,
   evaluateRemoteAccess,
   FederationIntegrityError,
+  MissingRemoteExportError,
   removeCssPoison,
+  toFederationResult,
+  validateRemoteEntries,
   validateSharedSingletons,
   withTimeout,
   type CssPoisonGuardOptions,
+  type FederationResult,
   type RemoteAccessPolicy,
+  type RemoteEntriesPolicy,
+  type RemoteEntryInput,
+  type RemoteEntryIssue,
   type SharedConfig,
   type SharedModule,
   type SharedModules,
   type ShareStrategy
 } from "mf-shield";
 import {
+  buildOfflineManifest,
   createFederatedLoader,
   createFederationRuntime,
   createInstanceFederationRuntime,
+  createLoaderFromInstance,
   createRemoteAccessPlugin,
   createRemoteFallbackPlugin,
   createSriPlugin,
   initFederationShield,
   resolveIntegrity,
   type IntegritySource,
+  type OfflineManifest,
+  type OfflineManifestInput,
   type RemoteAccessPluginOptions,
+  type RemoteFallback,
   type RemoteFallbackInfo,
   type RemoteFallbackPluginOptions,
+  type RemoteModuleStub,
+  type RemoteStubMap,
   type SharedModules as FederationSharedModules,
   type ShareStrategy as FederationShareStrategy,
+  type ShieldInstanceOptions,
   type SriPluginOptions
 } from "mf-shield/federation";
 import {
@@ -134,6 +150,40 @@ const loadRemoteFromInstance = createInstanceFederationRuntime({
   plugins: [accessPlugin, fallbackPlugin, sriPlugin, sriPluginFn]
 });
 
+// Feature 4: createLoaderFromInstance — the instance is a caller-owned parameter (getInstance() null-guard is the caller's job).
+const contractInstance = {
+  registerPlugins: () => undefined,
+  registerRemotes: () => undefined,
+  loadRemote: async () => null
+} as unknown as Parameters<typeof createLoaderFromInstance>[0];
+const contractInstanceOptions: ShieldInstanceOptions<"stable"> = { remoteEntries, plugins: [accessPlugin, fallbackPlugin] };
+const loadRemoteFromExistingInstance = createLoaderFromInstance(contractInstance, contractInstanceOptions);
+const loadRemoteFromBareInstance = createLoaderFromInstance<"stable">(contractInstance);
+
+// Feature 6: declarative stub map for the fallback (with the onLoad lifecycle gate applied internally).
+const contractObjectStub: RemoteModuleStub = { RemoteWidget: Remote };
+const contractFactoryStub: RemoteModuleStub = () => ({ RemoteWidget: Remote });
+const contractAsyncStub: RemoteModuleStub = async () => ({ RemoteWidget: Remote });
+const contractStubMap: RemoteStubMap = {
+  "stable/Widget": contractObjectStub,
+  "stable/Factory": contractFactoryStub,
+  "stable/Async": contractAsyncStub,
+  "*": { RemoteWidget: Remote }
+};
+const contractFallbackFn: RemoteFallback = (info: RemoteFallbackInfo) => (info.lifecycle === "onLoad" ? { RemoteWidget: Remote } : undefined);
+const stubMapPlugin = createRemoteFallbackPlugin({ fallback: contractStubMap });
+const fnFallbackPlugin = createRemoteFallbackPlugin({ fallback: contractFallbackFn });
+
+// Feature 5: offline manifest synthesis via the fallback plugin's fetch loaderHook.
+const contractOfflineInput: OfflineManifestInput = { name: "stable", globalName: "stable_g", publicPath: "/stable/", remoteEntryName: "remoteEntry.js" };
+const contractOfflineManifest: OfflineManifest = buildOfflineManifest(contractOfflineInput);
+const offlineManifestPlugin = createRemoteFallbackPlugin({
+  fallback: contractStubMap,
+  offlineManifest: contractOfflineInput,
+  onOfflineManifest: info => void `${info.manifestUrl}: ${String(info.error)}`
+});
+const offlineManifestBoolPlugin = createRemoteFallbackPlugin({ fallback: () => undefined, offlineManifest: true });
+
 void initFederationShield({ name: "contract_host", remotes: [] });
 void withTimeout(Promise.resolve("ok"), 1, "contract timeout");
 void evaluateRemoteAccess(() => allowRemoteAccess());
@@ -141,6 +191,8 @@ void evaluateRemoteAccess(() => false);
 void loadRemote<{ RemoteWidget: RemoteComponent }>("stable/Widget");
 void loadRemoteFromRuntime<{ RemoteWidget: RemoteComponent }>("stable/Widget");
 void loadRemoteFromInstance<{ RemoteWidget: RemoteComponent }>("stable/Widget");
+void loadRemoteFromExistingInstance<{ RemoteWidget: RemoteComponent }>("stable/Widget");
+void loadRemoteFromBareInstance<{ RemoteWidget: RemoteComponent }>("stable/Widget");
 void removeCssPoison;
 void resolveIntegrity(integrityMap, "http://127.0.0.1:4174/static/js/stable.js");
 void resolveIntegrity(integrityFn, "http://127.0.0.1:4174/static/js/stable.js");
@@ -149,6 +201,36 @@ void validateSharedSingletons({ shared: contractSharedModules, shareStrategy: co
 void contractSharedConfig;
 void contractFederationShared;
 void contractFederationStrategy;
+
+// Feature 1: export-contract validation.
+const contractModule: { RemoteWidget?: RemoteComponent } = { RemoteWidget: Remote };
+assertRemoteExports(contractModule, "stable/Widget", ["RemoteWidget"]);
+void contractModule.RemoteWidget;
+void new MissingRemoteExportError("stable/Widget", ["RemoteWidget"]);
+
+// Feature 2: remote entries validation (fully agnostic report).
+const contractEntries: RemoteEntryInput[] = [
+  { name: "stable", entry: "https://cdn.pokedex.example/stable/mf-manifest.json" },
+  { name: "registry-only", version: "1.2.3" }
+];
+const contractEntriesPolicy: RemoteEntriesPolicy = { allowedOrigins: ["https://cdn.pokedex.example"], requireHttps: true };
+const contractEntryIssues: RemoteEntryIssue[] = validateRemoteEntries(contractEntries, contractEntriesPolicy);
+void contractEntryIssues;
+
+// Feature 3: FederationResult narrow combinator.
+void (async () => {
+  const result: FederationResult<{ RemoteWidget: RemoteComponent }> = await toFederationResult(() =>
+    loadRemote<{ RemoteWidget: RemoteComponent }>("stable/Widget")
+  );
+  if (result.ok) void result.value.RemoteWidget;
+  else void result.error;
+});
+
+void contractOfflineManifest;
+void stubMapPlugin;
+void fnFallbackPlugin;
+void offlineManifestPlugin;
+void offlineManifestBoolPlugin;
 
 export function ConsumerPublicApiContract() {
   useCssPoisonGuard(cssPoisonGuardOptions);
