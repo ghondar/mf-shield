@@ -1,6 +1,6 @@
 {
   "name": "mf-shield",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A resilience shield for Module Federation: typed errors, access policies, timeouts, SRI, CSS-poison guard and React boundaries",
   "keywords": [
     "module-federation",
